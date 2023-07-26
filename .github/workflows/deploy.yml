@@ -22,11 +22,13 @@ jobs:
       run: |
         python -m venv env
         source env/bin/activate
+        pip install --upgrade pip
         pip install -r requirements.txt
 
     - name: Run tests
       run: |
         source env/bin/activate
+        pip install --upgrade pip
         python -m unittest
 
     - name: Install sshpass
@@ -34,4 +36,4 @@ jobs:
 
     - name: Deploy Discord Bot
       run: |
-        sshpass -p ${{ secrets.SSH_PASSWORD }} ssh -v -p 2222 -o StrictHostKeyChecking=no devassistant@srv260.prodns.com.br "cd /home2/devassistant/DevAssistantDiscordBot/ && git fetch && git reset --hard origin/main && source env/bin/activate && pip install -r requirements.txt"
+        sshpass -p ${{ secrets.SSH_PASSWORD }} ssh -v -p 2222 -o StrictHostKeyChecking=no devassistant@srv260.prodns.com.br "cd /home2/devassistant/DevAssistantDiscordBot/ && git fetch && git reset --hard origin/main && source env/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
