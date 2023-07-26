@@ -1,28 +1,12 @@
 # Dev Assistant Discord Bot
 
-Este é um bot do Discord desenvolvido para auxiliar desenvolvedores em suas tarefas diárias.
+O Dev Assistant é uma ferramenta desenvolvida para auxiliar desenvolvedores em suas tarefas diárias. Ele oferece uma variedade de funcionalidades, incluindo gerenciamento de projetos, automação de tarefas e muito mais.
 
-## Versões
+O Dev Assistant Discord Bot é uma extensão do Dev Assistant que permite aos usuários interagir com o Dev Assistant diretamente do Discord. Ele oferece uma interface conveniente e fácil de usar para acessar as funcionalidades do Dev Assistant.
 
-Existem duas versões deste bot: a versão de desenvolvimento (dev) e a versão de produção (prod).
+## Como usar o Dev Assistant Discord Bot
 
-### Versão de Desenvolvimento
-
-A versão de desenvolvimento é usada para testar novas funcionalidades e correções de bugs antes de serem implementadas na versão de produção. Para executar a versão de desenvolvimento, siga estas etapas:
-
-1. Clone o repositório.
-2. Navegue até o diretório do projeto.
-3. Ative o ambiente virtual Python (`env\Scripts\activate`).
-4. Execute o bot (`python main.py`).
-
-### Versão de Produção
-
-A versão de produção é a versão do bot que está ativamente em uso. Para executar a versão de produção, siga estas etapas:
-
-1. Clone o repositório.
-2. Navegue até o diretório do projeto.
-3. Ative o ambiente virtual Python (`env\Scripts\activate`).
-4. Execute o bot (`python main.py`).
+Para usar o Dev Assistant Discord Bot, você precisa ter o Discord instalado e uma conta no Discord. Uma vez que você tenha isso, você pode adicionar o bot ao seu servidor do Discord e começar a usá-lo.
 
 ## Testes
 
