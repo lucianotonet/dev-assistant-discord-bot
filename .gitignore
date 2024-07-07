@@ -18,3 +18,12 @@ ENV/
 # Logs
 logs/
 *.log
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+.env
+config.json
+.db.json
+memory.json
