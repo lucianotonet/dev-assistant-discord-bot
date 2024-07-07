@@ -9,7 +9,7 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 const TOKEN_LIMIT = 8192;
 const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
-const LLM_TEMPERATURE = 0.5;
+const LLM_TEMPERATURE = 0.2; // Ajuste da temperatura para minimizar invenções
 
 const sanitizeMessage = (content) => content.replace(/@\S+/g, '@user');
 
@@ -67,10 +67,9 @@ const countTokens = (text) => {
 const generateResponse = async (message, bot, messageHistory) => {
     const systemPrompt = `
     Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
-    INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado.
+    INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado. Não invente informações, responda apenas com dados reais.
     CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
-    HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}
-    ÚLTIMA MENSAGEM: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: (message.author.globalName || message.author.username) })}
+    HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}    
   `;
 
     const contextLength = countTokens(systemPrompt);
@@ -89,7 +88,7 @@ const generateResponse = async (message, bot, messageHistory) => {
                     { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
                 ],
                 // model: LLM_MODELS[modelIndex],
-                model: 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a chamada de funções
+                model: 'mixtral-8x7b-32768', // 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a chamada de funções
                 max_tokens: maxTokens,
                 temperature: LLM_TEMPERATURE,
                 top_p: 1,
@@ -133,10 +132,9 @@ const generateResponse = async (message, bot, messageHistory) => {
         // Nova inferência para montar a resposta final ao usuário
         const finalPrompt = `
             Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
-            INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado.
+            INSTRUÇÕES: Trate as respostas com empatia e cuidado. Certifique-se de compreender a conversa e responder de forma humana. Evite inventar informações, responda apenas com dados reais.
             CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
-            HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}
-            ÚLTIMA MENSAGEM: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: (message.author.globalName || message.author.username) })}
+            HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}            
         `;
 
         await message.channel.sendTyping();
@@ -178,15 +176,17 @@ const truncateMessageHistory = (messageHistory) => {
 const shouldRespondToMessage = async (message, bot) => {
     const shouldRespondPrompt = `
         Você é um assistente de conversa que decide se deve responder a uma mensagem do usuário.
-        INSTRUÇÕES: Leia a mensagem do usuário e decida se é necessário responder. Considere o contexto da conversa e a relevância da mensagem.
+        INSTRUÇÕES: Leia a mensagem do usuário e decida se é necessário responder. Considere o contexto da conversa e a relevância da mensagem. Não invente informações, responda apenas com dados reais.
         Responda em JSON com o seguinte formato: '{"shouldRespond": true/false, "reason": "Motivo da decisão"}'.
         CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
         HISTÓRICO DE MENSAGENS: ${JSON.stringify(await fetchMessageHistory(message))}
-        MENSAGEM DO USUÁRIO: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` })}
     `;
 
     const response = await groq.chat.completions.create({
-        messages: [{ role: 'system', content: shouldRespondPrompt }],
+        messages: [
+            { role: 'system', content: shouldRespondPrompt }, 
+            { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` }
+        ],
         model: 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a respostas em JSON
         max_tokens: TOKEN_LIMIT,
         temperature: LLM_TEMPERATURE,
@@ -211,10 +211,11 @@ const handleAPIError = async (message, err) => {
             if (!shouldRespondResponse.shouldRespond) {
                 console.log(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
                 const ignoredEmbed = new EmbedBuilder()
-                    .setTitle('Ignorado!')
+                    // .setTitle('Ignorado!')
                     .setDescription(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`)
                     .setColor(0xFFA500);
 
+                
                 await message.channel.send({ embeds: [ignoredEmbed] });
                 return;
             }
@@ -223,7 +224,7 @@ const handleAPIError = async (message, err) => {
 
             const reply = await generateResponse(message, message.client.user, truncatedHistory);
             if (reply.content) {
-                await message.channel.send(reply.content);
+                await sendChunkedMessage(message, reply.content);
             }
 
             success = true;
@@ -246,6 +247,25 @@ const handleAPIError = async (message, err) => {
     }
 };
 
+const sendChunkedMessage = async (message, content) => {
+    const maxLength = 2000;
+    const paragraphs = content.split('\n\n');
+    let currentChunk = '';
+
+    for (const paragraph of paragraphs) {
+        if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
+            await message.channel.send(currentChunk.trim());
+            currentChunk = paragraph;
+        } else {
+            currentChunk += '\n\n' + paragraph;
+        }
+    }
+
+    if (currentChunk.trim().length > 0) {
+        await message.channel.send(currentChunk.trim());
+    }
+};
+
 module.exports = {
     name: Events.MessageCreate,
     async execute(message) {
@@ -259,6 +279,13 @@ module.exports = {
             const shouldRespondResponse = await shouldRespondToMessage(message, bot);
             if (!shouldRespondResponse.shouldRespond) {
                 console.log(`Dev Assistant decidiu não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
+                const ignoredEmbed = new EmbedBuilder()
+                    // .setTitle('Ignorado!')
+                    .setDescription(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`)
+                    .setColor(0xFFA500);
+
+                
+                await message.channel.send({ embeds: [ignoredEmbed] });
                 return;
             }
 
@@ -266,14 +293,7 @@ module.exports = {
 
             const reply = await generateResponse(message, bot, truncatedHistory);
             if (reply && reply.trim()) {
-                const maxLength = 2000;
-                const parts = reply.match(new RegExp(`.{1,${maxLength}}(\\s|$)|.{1,${maxLength}}`, 'g'));
-
-                for (const part of parts) {
-                    await message.channel.sendTyping();
-                    await message.channel.send(part.trim());
-                    await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
-                }
+                await sendChunkedMessage(message, reply);
             }
 
         } catch (err) {
