@@ -1,1 +1,2 @@
-# Dev Assistant - Discord bot
+# Dev Assistant Discord Bot
+
