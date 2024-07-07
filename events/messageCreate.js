@@ -270,6 +270,7 @@ module.exports = {
                 const parts = reply.match(new RegExp(`.{1,${maxLength}}(\\s|$)|.{1,${maxLength}}`, 'g'));
 
                 for (const part of parts) {
+                    await message.channel.sendTyping();
                     await message.channel.send(part.trim());
                     await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
                 }
