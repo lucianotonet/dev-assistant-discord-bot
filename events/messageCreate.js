@@ -249,9 +249,6 @@ const handleAPIError = async (message, err) => {
 module.exports = {
     name: Events.MessageCreate,
     async execute(message) {
-
-        console.log(message)
-
         const bot = message.client.user;
         if (message.author.id === bot.id || (!message.mentions.has(bot) && message.author.bot)) return;
 
@@ -261,7 +258,7 @@ module.exports = {
 
             const shouldRespondResponse = await shouldRespondToMessage(message, bot);
             if (!shouldRespondResponse.shouldRespond) {
-                console.log(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
+                console.log(`Dev Assistant decidiu não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
                 return;
             }
 
@@ -269,7 +266,21 @@ module.exports = {
 
             const reply = await generateResponse(message, bot, truncatedHistory);
             if (reply) {
-                await message.channel.send(reply);
+                const maxLength = 2000;
+                const parts = reply.split('\n');
+
+                for (const part of parts) {
+                    if (part.length > maxLength) {
+                        const subParts = part.match(new RegExp(`.{1,${maxLength}}`, 'g'));
+                        for (const subPart of subParts) {
+                            await message.channel.send(subPart);
+                            await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
+                        }
+                    } else {
+                        await message.channel.send(part);
+                        await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
+                    }
+                }
             }
 
         } catch (err) {
