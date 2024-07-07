@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
 const TOKEN_LIMIT = 8192;
-const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'] //, 'mixtral-8x7b-32768'];
+const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
 const LLM_TEMPERATURE = 0.5;
 
 const sanitizeMessage = (content) => content.replace(/@\S+/g, '@user');
@@ -66,9 +66,10 @@ const countTokens = (text) => {
 
 const generateResponse = async (message, bot, messageHistory) => {
     const systemPrompt = `
-    Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via Discord.
-    INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente.
+    Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
+    INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado.
     CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
+    HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}
     ÚLTIMA MENSAGEM: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: (message.author.globalName || message.author.username) })}
   `;
 
@@ -88,7 +89,7 @@ const generateResponse = async (message, bot, messageHistory) => {
                     { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
                 ],
                 // model: LLM_MODELS[modelIndex],
-                model: 'llama3-8b-8192', // <- vamos dar preferência
+                model: 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a chamada de funções
                 max_tokens: maxTokens,
                 temperature: LLM_TEMPERATURE,
                 top_p: 1,
@@ -131,9 +132,10 @@ const generateResponse = async (message, bot, messageHistory) => {
 
         // Nova inferência para montar a resposta final ao usuário
         const finalPrompt = `
-            Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via Discord.
-            INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente.
+            Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
+            INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado.
             CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
+            HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}
             ÚLTIMA MENSAGEM: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: (message.author.globalName || message.author.username) })}
         `;
 
@@ -176,9 +178,10 @@ const truncateMessageHistory = (messageHistory) => {
 const shouldRespondToMessage = async (message, bot) => {
     const shouldRespondPrompt = `
         Você é um assistente de conversa que decide se deve responder a uma mensagem do usuário.
-        INSTRUÇÕES: Leia a mensagem do usuário e decida se é necessário responder.
+        INSTRUÇÕES: Leia a mensagem do usuário e decida se é necessário responder. Considere o contexto da conversa e a relevância da mensagem.
         Responda em JSON com o seguinte formato: '{"shouldRespond": true/false, "reason": "Motivo da decisão"}'.
         CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
+        HISTÓRICO DE MENSAGENS: ${JSON.stringify(await fetchMessageHistory(message))}
         MENSAGEM DO USUÁRIO: ${JSON.stringify({ role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` })}
     `;
 
@@ -210,7 +213,7 @@ const handleAPIError = async (message, err) => {
                 const ignoredEmbed = new EmbedBuilder()
                     .setTitle('Ignorado!')
                     .setDescription(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`)
-                    .setColor(0x00A500);
+                    .setColor(0xFFA500);
 
                 await message.channel.send({ embeds: [ignoredEmbed] });
                 return;
