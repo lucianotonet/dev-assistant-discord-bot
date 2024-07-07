@@ -265,16 +265,18 @@ module.exports = {
             await message.channel.sendTyping();
 
             const reply = await generateResponse(message, bot, truncatedHistory);
-            if (reply) {
+            if (reply && reply.trim()) {
                 const maxLength = 2000;
-                const parts = reply.split('\n');
+                const parts = reply.split(/[\n\r]+/).filter(part => part.trim().length > 0);
 
                 for (const part of parts) {
                     if (part.length > maxLength) {
                         const subParts = part.match(new RegExp(`.{1,${maxLength}}`, 'g'));
                         for (const subPart of subParts) {
-                            await message.channel.send(subPart);
-                            await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
+                            if (subPart.trim().length > 0) {
+                                await message.channel.send(subPart);
+                                await new Promise(resolve => setTimeout(resolve, 1000)); // Adiciona um cooldown de 1 segundo entre os envios
+                            }
                         }
                     } else {
                         await message.channel.send(part);
