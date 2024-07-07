@@ -187,7 +187,7 @@ const shouldRespondToMessage = async (message, bot) => {
 
     const response = await groq.chat.completions.create({
         messages: [{ role: 'system', content: shouldRespondPrompt }],
-        model: LLM_MODELS[0],
+        model: 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a respostas em JSON
         max_tokens: TOKEN_LIMIT,
         temperature: LLM_TEMPERATURE,
         top_p: 1,
