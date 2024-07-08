@@ -10,12 +10,12 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 // Constantes
 const DEBUG = true;
 const TOKEN_LIMIT = 8192;
-const LLM_MODELS = ['mixtral-8x7b-32768', 'gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
-const LLM_MODELS_TOOLS = ['llama3-8b-8192', 'llama3-70b-8192'];
+const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
+const LLM_MODELS_TOOLS = ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768'];
 const LLM_TEMPERATURE = 0.9;
 
-// Camada de raciocínio (Chain of Thought, Chain of Reasoning, Chain of Consequence)
-const LLM_REASONING = 'CoT'; // CoT: Chain of Thought, CoR: Chain of Reasoning, CoC: Chain of Consequence
+// Camada de raciocínio -> https://www.promptingguide.ai/techniques
+const LLM_REASONING = 'CoT'; // Zero-Shot, Few-Shot, CoT, Self-Consistency, CoR, APE, Active-Prompt, ... 
 
 // Tempo de espera em milissegundos para novas tentativas após erro 429 (Rate Limit)
 const RATE_LIMIT_RETRY_DELAY = 1000;
@@ -28,25 +28,37 @@ const tools = [
         type: "function",
         function: {
             name: "calendar_tool",
-            description: "Obtém a hora atual em diferentes formatos.",
+            description: "Obtém a data e hora atuais em diferentes formatos e localidades.",
             parameters: {
                 type: "object",
                 properties: {
                     format: {
                         type: "string",
-                        description: "O formato da hora a ser retornado. Pode ser '24h' para formato de 24 horas ou '12h' para formato de 12 horas."
+                        description: "O formato da hora a ser retornado. Pode ser '24h' para formato de 24 horas ou '12h' para formato de 12 horas. Padrão é '24h'."
                     },
                     locale: {
                         type: "string",
-                        description: "A localidade para formatação da data/hora. Exemplo: 'pt-BR' para português do Brasil."
+                        description: "A localidade para formatação da data/hora. Exemplo: 'pt-BR' para português do Brasil. Padrão é 'pt-BR'."
+                    },
+                    includeDate: {
+                        type: "boolean",
+                        description: "Se deve incluir a data na resposta. Padrão é 'false'."
                     }
                 },
-                required: ["format"]
+                required: []
             }
         },
         function_call: (parameters = {}) => {
-            const { format, locale = 'pt-BR' } = parameters;
-            const options = { hour12: format === '12h' };
+            const { format = '24h', locale = 'pt-BR', includeDate = false } = parameters;
+            const options = {
+                hour12: format === '12h',
+                year: includeDate ? 'numeric' : undefined,
+                month: includeDate ? '2-digit' : undefined,
+                day: includeDate ? '2-digit' : undefined,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            };
             return new Date().toLocaleString(locale, options);
         }
     },
@@ -117,31 +129,55 @@ const countTokens = (text) => {
     return tokenCount;
 };
 
-// Função para aplicar a camada de raciocínio
-const applyReasoningLayer = (messages, reasoningMode) => {
-    let instructions = '';
-
+// Função para aplicar a técnica de raciocínio
+const applyReasoningTechinqueLayer = (messages, reasoningMode) => {
     switch (reasoningMode) {
+        case 'Zero-Shot':
+            // Implementação para Zero-Shot Prompting
+            return messages; // Zero-Shot: Sem exemplos, apenas direto ao ponto
+        case 'Few-Shot':
+            // Implementação para Few-Shot Prompting
+            messages.unshift({
+                role: 'system',
+                content: "Exemplo 1: Entrada e saída. Exemplo 2: Entrada e saída."
+            });
+            return messages; // Few-Shot: Adiciona exemplos
         case 'CoT':
-            instructions = 'Pense passo a passo sobre a pergunta e elabore sua resposta.';
-            break;
+            // Implementação para Chain of Thought Prompting (CoT)
+            messages.push({
+                role: 'system',
+                content: "Pense passo a passo para resolver o problema."
+            });
+            return messages; // Chain of Thought: Adiciona raciocínio passo a passo
+        case 'Self-Consistency':
+            // Implementação para Self-Consistency
+            // Gerar múltiplas respostas e escolher a mais comum seria uma lógica implementada em nível de geração de respostas, fora deste escopo
+            return messages;
         case 'CoR':
-            instructions = 'Descreva as razões por trás de sua resposta, considerando diferentes perspectivas.';
-            break;
-        case 'CoC':
-            instructions = 'Considere as possíveis consequências de sua resposta e como elas afetam o contexto.';
-            break;
+            // Implementação para Chain of Reasoning Prompting (CoR)
+            messages.push({
+                role: 'system',
+                content: "Raciocine logicamente com base nas premissas fornecidas."
+            });
+            return messages; // Chain of Reasoning: Adiciona lógica de raciocínio
+        case 'APE':
+            // Implementação para Automatic Prompt Engineer (APE)
+            // Ajustes automáticos seriam aplicados dinamicamente
+            return messages;
+        case 'Active-Prompt':
+            // Implementação para Active-Prompt
+            // Utilização ativa das ferramentas seria aplicada durante a execução das funções
+            return messages;
         default:
-            instructions = 'Pense cuidadosamente sobre sua resposta.';
-            break;
+            console.warn(`Modo de raciocínio desconhecido: ${reasoningMode}`);
+            return messages;
     }
-
-    messages.unshift({ role: 'system', content: instructions });
-    return messages;
 };
 
 // Função principal para gerar respostas
-const generateResponse = async (message, bot, messageHistory) => {
+const generateResponse = async (message, bot) => {
+    const messageHistory = await fetchMessageHistory(message);
+    const truncatedHistory = truncateMessageHistory(messageHistory);
     const systemPrompt = `
         Esta é uma conversa de trabalho via Discord onde você é ${bot.username} <@!${bot.id}>, e sua responsabilidade é garantir a execução e entrega por parte dos humanos.
         INSTRUÇÕES: Compreenda a conversa e responda coerentemente. Use as ferramentas disponíveis quando apropriado. Não invente informações, responda apenas com dados reais.
@@ -160,15 +196,15 @@ const generateResponse = async (message, bot, messageHistory) => {
         try {
             let messages = [
                 { role: 'system', content: systemPrompt },
-                ...messageHistory,
+                ...truncatedHistory,
                 { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
             ];
 
-            messages = applyReasoningLayer(messages, LLM_REASONING);
-
-            console.log(colors.yellow(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
+            // Aplicar a técnica de raciocínio
+            messages = applyReasoningTechinqueLayer(messages, LLM_REASONING);
 
             console.log(colors.blue(`Attempting to generate response using model: ${LLM_MODELS_TOOLS[modelIndex]}`)); // Log the model being used
+            console.log(colors.white(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
 
             chatResponse = await groq.chat.completions.create({
                 messages: messages,
@@ -233,7 +269,7 @@ const generateResponse = async (message, bot, messageHistory) => {
     // Processa chamadas de ferramentas, se houver
     const toolCalls = chatResponse.choices[0].message.tool_calls;
 
-    messageHistory.push({
+    truncatedHistory.push({
         ...chatResponse.choices[0].message
     });
 
@@ -246,7 +282,7 @@ const generateResponse = async (message, bot, messageHistory) => {
                     const functionArgs = JSON.parse(toolCall.function.arguments);
                     const functionResponse = await tool.function_call(functionArgs);
 
-                    messageHistory.push({
+                    truncatedHistory.push({
                         tool_call_id: toolCall.id,
                         role: 'tool',
                         name: tool.function.name,
@@ -254,7 +290,7 @@ const generateResponse = async (message, bot, messageHistory) => {
                     });
                 } catch (error) {
                     console.error(colors.red(`Erro na chamada da ferramenta ${tool.function.name}: ${error.message}`));
-                    messageHistory.push({
+                    truncatedHistory.push({
                         tool_call_id: toolCall.id,
                         role: 'tool',
                         name: tool.function.name,
@@ -280,13 +316,15 @@ const generateResponse = async (message, bot, messageHistory) => {
 
         let messages = [
             { role: 'system', content: finalPrompt },
-            ...messageHistory,
             { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
+            ...truncatedHistory,
         ];
 
-        messages = applyReasoningLayer(messages, LLM_REASONING);
+        // Aplicar a técnica de raciocínio
+        messages = applyReasoningTechinqueLayer(messages, LLM_REASONING);
 
-        console.log(colors.yellow(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
+        console.log(colors.blue(`Attempting to generate response using model: ${LLM_MODELS[0]}`)); // Log the model being used
+        console.log(colors.white(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
 
         await message.channel.sendTyping();
         const finalResponse = await groq.chat.completions.create({
@@ -329,14 +367,17 @@ const handleAPIError = async (message, err) => {
 
     while (retryCount < MAX_RETRY_COUNT) {
         try {
-            const messageHistory = await fetchMessageHistory(message);
-            const truncatedHistory = truncateMessageHistory(messageHistory);
-
             await message.channel.sendTyping();
 
-            const reply = await generateResponse(message, message.client.user, truncatedHistory);
+            const reply = await generateResponse(message, message.client.user);
             if (reply) {
                 await sendChunkedMessage(message, reply);
+                if (DEBUG) {
+                    const debugEmbed = new EmbedBuilder()                        
+                        .setDescription(`Modelo LLM: ${LLM_MODELS_TOOLS[0]}\nTemperatura: ${LLM_TEMPERATURE}\nModo de Raciocínio: ${LLM_REASONING}`)
+                        .setColor(0x00FF00);
+                    await message.channel.send({ embeds: [debugEmbed] });
+                }
             }
 
             // Sai do loop se a resposta for enviada com sucesso
@@ -424,14 +465,17 @@ module.exports = {
         setTimeout(() => timestamps.delete(message.channel.id), cooldownAmount);
 
         try {
-            const messageHistory = await fetchMessageHistory(message);
-            const truncatedHistory = truncateMessageHistory(messageHistory);
-
             await message.channel.sendTyping();
 
-            const reply = await generateResponse(message, bot, truncatedHistory);
+            const reply = await generateResponse(message, bot);
             if (reply) {
                 await sendChunkedMessage(message, reply);
+                if (DEBUG) {
+                    const debugEmbed = new EmbedBuilder()                        
+                        .setDescription(`Modelo LLM: ${LLM_MODELS_TOOLS[0]}\nTemperatura: ${LLM_TEMPERATURE}\nModo de Raciocínio: ${LLM_REASONING}`)
+                        .setColor(0x00FF00);
+                    await message.channel.send({ embeds: [debugEmbed] });
+                }
             }
         } catch (err) {
             if (err instanceof APIError && err.status === 400) {
