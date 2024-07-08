@@ -1,52 +1,66 @@
-const { Events, EmbedBuilder } = require('discord.js');
+const { Events, EmbedBuilder, Collection } = require('discord.js');
 const { Groq, APIError } = require('groq-sdk');
-const { APP_URL, GROQ_API_KEY } = process.env;
-const fs = require('fs');
-const path = require('path');
+const { APP_URL, GROQ_API_KEY, NODE_ENV } = process.env;
 const { v4: uuidv4 } = require('uuid');
+const colors = require('colors');
 
+// Inicialização do cliente Groq
 const groq = new Groq({ apiKey: GROQ_API_KEY });
 
+// Constantes
+const DEBUG = true;
 const TOKEN_LIMIT = 8192;
-const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
-const LLM_TEMPERATURE = 0.2; // Ajuste da temperatura para minimizar invenções
+const LLM_MODELS = ['mixtral-8x7b-32768', 'gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
+const LLM_MODELS_TOOLS = ['llama3-8b-8192', 'llama3-70b-8192'];
+const LLM_TEMPERATURE = 0.9;
 
-const sanitizeMessage = (content) => content.replace(/@\S+/g, '@user');
+// Camada de raciocínio (Chain of Thought, Chain of Reasoning, Chain of Consequence)
+const LLM_REASONING = 'CoT'; // CoT: Chain of Thought, CoR: Chain of Reasoning, CoC: Chain of Consequence
 
-// Funções de Ferramentas
+// Tempo de espera em milissegundos para novas tentativas após erro 429 (Rate Limit)
+const RATE_LIMIT_RETRY_DELAY = 1000;
+// Número máximo de tentativas de resposta em caso de erro 400 (Bad Request)
+const MAX_RETRY_COUNT = 3;
+
+// Definição das ferramentas disponíveis para o assistente
 const tools = [
     {
         type: "function",
         function: {
             name: "calendar_tool",
-            description: "Use this function to get the current time.",
+            description: "Obtém a hora atual em diferentes formatos.",
             parameters: {
                 type: "object",
                 properties: {
                     format: {
                         type: "string",
-                        description: "The format of the time to return."
+                        description: "O formato da hora a ser retornado. Pode ser '24h' para formato de 24 horas ou '12h' para formato de 12 horas."
                     },
+                    locale: {
+                        type: "string",
+                        description: "A localidade para formatação da data/hora. Exemplo: 'pt-BR' para português do Brasil."
+                    }
                 },
                 required: ["format"]
             }
         },
         function_call: (parameters = {}) => {
-            const format = parameters.format || 'h:i:s';
-            return new Date().toLocaleString('pt-BR', { hour12: false });
+            const { format, locale = 'pt-BR' } = parameters;
+            const options = { hour12: format === '12h' };
+            return new Date().toLocaleString(locale, options);
         }
     },
     {
         type: "function",
         function: {
             name: "weather_tool",
-            description: "Use this function to get the current weather in a specific location.",
+            description: "Obtém o clima atual em uma localização específica.",
             parameters: {
                 type: "object",
                 properties: {
                     location: {
                         type: "string",
-                        description: "The location for which to get the weather."
+                        description: "A localização para obter o clima."
                     }
                 },
                 required: ["location"]
@@ -54,96 +68,230 @@ const tools = [
         },
         function_call: (parameters = {}) => {
             const location = parameters.location || 'New York';
-            return `30°C, sunny in ${location}`;
+            return `30°C, ensolarado em ${location}`;
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "dev_assistant_api_get",
+            description: "Faz uma requisição GET para a API do DevAssistant.",
+            parameters: {
+                type: "object",
+                properties: {
+                    endpoint: {
+                        type: "string",
+                        description: "O endpoint da API a ser acessado."
+                    }
+                },
+                required: ["endpoint"]
+            }
+        },
+        function_call: async (parameters = {}) => {
+            const endpoint = parameters.endpoint;
+            const url = `https://devassistant.tonet.dev/api${endpoint}`;
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                return JSON.stringify(data); // Retorna a resposta como string
+            } catch (error) {
+                console.error("Erro na requisição à API:", error);
+                return "Ocorreu um erro ao processar sua solicitação.";
+            }
         }
     }
 ];
 
+// Função para contar tokens baseado no modelo Tiktoken
 const countTokens = (text) => {
-    // Função simples para contar tokens com base no número de palavras
-    return text.split(/\s+/).length;
+    const encoding = new TextEncoder();
+    const words = text.split(/\s+/);
+    let tokenCount = 0;
+
+    for (const word of words) {
+        const encodedWord = encoding.encode(word);
+        tokenCount += Math.ceil(encodedWord.length / 4);
+    }
+
+    return tokenCount;
 };
 
+// Função para aplicar a camada de raciocínio
+const applyReasoningLayer = (messages, reasoningMode) => {
+    let instructions = '';
+
+    switch (reasoningMode) {
+        case 'CoT':
+            instructions = 'Pense passo a passo sobre a pergunta e elabore sua resposta.';
+            break;
+        case 'CoR':
+            instructions = 'Descreva as razões por trás de sua resposta, considerando diferentes perspectivas.';
+            break;
+        case 'CoC':
+            instructions = 'Considere as possíveis consequências de sua resposta e como elas afetam o contexto.';
+            break;
+        default:
+            instructions = 'Pense cuidadosamente sobre sua resposta.';
+            break;
+    }
+
+    messages.unshift({ role: 'system', content: instructions });
+    return messages;
+};
+
+// Função principal para gerar respostas
 const generateResponse = async (message, bot, messageHistory) => {
     const systemPrompt = `
-    Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
-    INSTRUÇÕES: Você deve continuar a compreender a conversa e responder coerentemente. Use as ferramentas disponíveis quando apropriado. Não invente informações, responda apenas com dados reais.
-    CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
-    HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}    
-  `;
+        Esta é uma conversa de trabalho via Discord onde você é ${bot.username} <@!${bot.id}>, e sua responsabilidade é garantir a execução e entrega por parte dos humanos.
+        INSTRUÇÕES: Compreenda a conversa e responda coerentemente. Use as ferramentas disponíveis quando apropriado. Não invente informações, responda apenas com dados reais.
+        CONTEXTO: Esta conversa pode incluir múltiplos participantes. Se precisar, refira-se a eles pelo ID.
+    `;
 
     const contextLength = countTokens(systemPrompt);
     const maxTokens = Math.max(TOKEN_LIMIT - contextLength, 100);
 
     let chatResponse;
     let modelIndex = 0;
-    let success = false;
 
-    while (!success && modelIndex < LLM_MODELS.length) {
+    // Tenta gerar uma resposta usando diferentes modelos em caso de falha
+    while (modelIndex < LLM_MODELS_TOOLS.length) {
         await message.channel.sendTyping();
         try {
+            let messages = [
+                { role: 'system', content: systemPrompt },
+                ...messageHistory,
+                { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
+            ];
+
+            messages = applyReasoningLayer(messages, LLM_REASONING);
+
+            console.log(colors.yellow(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
+
+            console.log(colors.blue(`Attempting to generate response using model: ${LLM_MODELS_TOOLS[modelIndex]}`)); // Log the model being used
+
             chatResponse = await groq.chat.completions.create({
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
-                ],
-                // model: LLM_MODELS[modelIndex],
-                model: 'mixtral-8x7b-32768', // 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a chamada de funções
+                messages: messages,
+                model: LLM_MODELS_TOOLS[modelIndex],
                 max_tokens: maxTokens,
                 temperature: LLM_TEMPERATURE,
                 top_p: 1,
                 tool_choice: "auto",
                 tools: tools.map(tool => ({ ...tool }))
             });
-            success = true;
+
+            // Para o loop se a resposta for gerada com sucesso
+            break;
         } catch (error) {
-            if (error instanceof APIError && error.status === 429) {
-                console.log(`Erro 429: Rate limit exceeded para o modelo ${LLM_MODELS[modelIndex]}. Tentando novamente após pausa.`);
-                await pause(1000); // Pausa de 1 segundo antes de tentar novamente
-                modelIndex++;
+            if (error instanceof APIError) {
+                if (error.status === 429) {
+                    console.log(colors.yellow(`Erro 429: Rate limit excedido para o modelo ${LLM_MODELS_TOOLS[modelIndex]}. Tentando novamente após pausa.`));
+                    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_RETRY_DELAY));
+                    modelIndex++;
+                } else if (error.status === 400 && error.message.includes('tool_code')) {
+                    console.log(colors.red(`Erro 400: Erro na chamada da ferramenta. Pulando para o próximo modelo. Detalhes: ${error.message}`));
+                    modelIndex++;
+                } else {
+                    console.error(colors.red(`Erro na API Groq: ${error.message}`));
+                    if (DEBUG) {
+                        const errorEmbed = new EmbedBuilder()
+                            .setTitle(`Erro na API Groq`)
+                            .setDescription(`Detalhes: ${error.message}`)
+                            .setColor(0xFF0000);
+                        await message.channel.send({ embeds: [errorEmbed] });
+                    }
+                    throw error;
+                }
             } else {
+                console.error(colors.red(`Erro inesperado: ${error.message}`));
+                if (DEBUG) {
+                    const errorEmbed = new EmbedBuilder()
+                        .setTitle(`Erro inesperado`)
+                        .setDescription(`Detalhes: ${error.message}`)
+                        .setColor(0xFF0000);
+                    await message.channel.send({ embeds: [errorEmbed] });
+                }
                 throw error;
             }
         }
     }
 
-    if (!success) {
-        throw new Error('Falha ao gerar resposta após várias tentativas.');
+    // Lança um erro se nenhum modelo gerar uma resposta
+    if (!chatResponse) {
+        const errorMessage = 'Falha ao gerar resposta após várias tentativas.';
+        console.error(colors.red(errorMessage));
+        if (DEBUG) {
+            const errorEmbed = new EmbedBuilder()
+                .setTitle(`Erro`)
+                .setDescription(`Detalhes: ${errorMessage}`)
+                .setColor(0xFF0000);
+            await message.channel.send({ embeds: [errorEmbed] });
+        }
+        throw new Error(errorMessage);
     }
 
+    // Processa chamadas de ferramentas, se houver
     const toolCalls = chatResponse.choices[0].message.tool_calls;
+
+    messageHistory.push({
+        ...chatResponse.choices[0].message
+    });
+
     if (toolCalls) {
         for (const toolCall of toolCalls) {
             await message.channel.sendTyping();
             const tool = tools.find(t => t.function.name === toolCall.function.name);
             if (tool) {
-                const functionArgs = JSON.parse(toolCall.function.arguments);
-                const functionResponse = tool.function_call(functionArgs);
+                try {
+                    const functionArgs = JSON.parse(toolCall.function.arguments);
+                    const functionResponse = await tool.function_call(functionArgs);
 
-                messageHistory.push({
-                    tool_call_id: toolCall.id,
-                    role: 'tool',
-                    name: tool.function.name,
-                    content: functionResponse
-                });
+                    messageHistory.push({
+                        tool_call_id: toolCall.id,
+                        role: 'tool',
+                        name: tool.function.name,
+                        content: functionResponse
+                    });
+                } catch (error) {
+                    console.error(colors.red(`Erro na chamada da ferramenta ${tool.function.name}: ${error.message}`));
+                    messageHistory.push({
+                        tool_call_id: toolCall.id,
+                        role: 'tool',
+                        name: tool.function.name,
+                        content: `Ocorreu um erro ao processar a solicitação. Por favor, tente novamente mais tarde.`
+                    });
+                    if (DEBUG) {
+                        const errorEmbed = new EmbedBuilder()
+                            .setTitle(`Erro na ferramenta ${tool.function.name}`)
+                            .setDescription(`Detalhes: ${error.message}`)
+                            .setColor(0xFF0000);
+                        await message.channel.send({ embeds: [errorEmbed] });
+                    }
+                }
             }
         }
 
         // Nova inferência para montar a resposta final ao usuário
         const finalPrompt = `
-            Você é ${bot.username} <@!${bot.id}> e esta é uma conversa profissional via chat.
-            INSTRUÇÕES: Trate as respostas com empatia e cuidado. Certifique-se de compreender a conversa e responder de forma humana. Evite inventar informações, responda apenas com dados reais.
-            CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
-            HISTÓRICO DE MENSAGENS: ${JSON.stringify(messageHistory)}            
+            Esta é uma conversa de trabalho via Discord onde você é ${bot.username} <@!${bot.id}>, e sua responsabilidade é garantir a execução e entrega por parte dos humanos.
+            INSTRUÇÕES: Trate as respostas com cuidado. Certifique-se de compreender a conversa e responder de forma humana. Evite inventar informações, responda apenas com dados reais.
+            CONTEXTO: Esta conversa pode incluir retorno ao chamado de suas ferramentas internas que podem conter as informações necessárias para a sua resposta final. Não precisa 
         `;
+
+        let messages = [
+            { role: 'system', content: finalPrompt },
+            ...messageHistory,
+            { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
+        ];
+
+        messages = applyReasoningLayer(messages, LLM_REASONING);
+
+        console.log(colors.yellow(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
 
         await message.channel.sendTyping();
         const finalResponse = await groq.chat.completions.create({
-            messages: [
-                { role: 'system', content: finalPrompt },
-                { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
-            ],
-            model: LLM_MODELS[modelIndex],
+            messages: messages,
+            model: LLM_MODELS[0],
             max_tokens: maxTokens,
             temperature: LLM_TEMPERATURE,
             top_p: 1
@@ -155,15 +303,17 @@ const generateResponse = async (message, bot, messageHistory) => {
     }
 };
 
+// Função para buscar o histórico de mensagens
 const fetchMessageHistory = async (message) => {
     const messages = await message.channel.messages.fetch({ limit: 100, before: message.id });
     return messages.reverse().map(msg => ({
         role: msg.author.bot ? 'assistant' : 'user',
         name: `${msg.author.globalName || msg.author.username} <@!${msg.author.id}>`,
-        content: sanitizeMessage(msg.content),
+        content: msg.content,
     }));
 };
 
+// Função para truncar o histórico de mensagens para caber no limite de tokens
 const truncateMessageHistory = (messageHistory) => {
     let totalTokens = messageHistory.reduce((acc, msg) => acc + countTokens(JSON.stringify(msg)), 0);
     while (totalTokens > TOKEN_LIMIT && messageHistory.length > 1) {
@@ -173,135 +323,129 @@ const truncateMessageHistory = (messageHistory) => {
     return messageHistory;
 };
 
-const shouldRespondToMessage = async (message, bot) => {
-    const shouldRespondPrompt = `
-        Você é um assistente de conversa que decide se deve responder a uma mensagem do usuário.
-        INSTRUÇÕES: Leia a mensagem do usuário e decida se é necessário responder. Considere o contexto da conversa e a relevância da mensagem. Não invente informações, responda apenas com dados reais.
-        Responda em JSON com o seguinte formato: '{"shouldRespond": true/false, "reason": "Motivo da decisão"}'.
-        CONTEXTO: Esta conversa pode incluir múltiplos tópicos e participantes.
-        HISTÓRICO DE MENSAGENS: ${JSON.stringify(await fetchMessageHistory(message))}
-    `;
-
-    const response = await groq.chat.completions.create({
-        messages: [
-            { role: 'system', content: shouldRespondPrompt }, 
-            { role: 'user', content: sanitizeMessage(message.content), name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` }
-        ],
-        model: 'llama3-8b-8192', // <- IMPORTANTE! Mantenha este modelo fixo para garantir a respostas em JSON
-        max_tokens: TOKEN_LIMIT,
-        temperature: LLM_TEMPERATURE,
-        top_p: 1,
-        response_format: { type: "json_object" }
-    });
-
-    return JSON.parse(response.choices[0].message.content);
-};
-
+// Função para lidar com erros de API
 const handleAPIError = async (message, err) => {
-    const maxRetries = 3;
     let retryCount = 0;
-    let success = false;
 
-    while (retryCount < maxRetries && !success) {
+    while (retryCount < MAX_RETRY_COUNT) {
         try {
             const messageHistory = await fetchMessageHistory(message);
             const truncatedHistory = truncateMessageHistory(messageHistory);
 
-            const shouldRespondResponse = await shouldRespondToMessage(message, message.client.user);
-            if (!shouldRespondResponse.shouldRespond) {
-                console.log(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
-                const ignoredEmbed = new EmbedBuilder()
-                    // .setTitle('Ignorado!')
-                    .setDescription(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`)
-                    .setColor(0xFFA500);
-
-                
-                await message.channel.send({ embeds: [ignoredEmbed] });
-                return;
-            }
-
             await message.channel.sendTyping();
 
             const reply = await generateResponse(message, message.client.user, truncatedHistory);
-            if (reply.content) {
-                await sendChunkedMessage(message, reply.content);
+            if (reply) {
+                await sendChunkedMessage(message, reply);
             }
 
-            success = true;
+            // Sai do loop se a resposta for enviada com sucesso
+            return;
         } catch (retryErr) {
             if (retryErr instanceof APIError && retryErr.status === 400) {
                 retryCount++;
-                if (retryCount >= maxRetries) {
+                console.warn(colors.yellow(`Erro 400 na tentativa ${retryCount}. Tentando novamente...`));
+                if (retryCount === MAX_RETRY_COUNT) {
                     const errorEmbed = new EmbedBuilder()
                         .setTitle(`Erro ${retryErr.status}`)
-                        .setDescription(`${retryErr.message}`)
+                        .setDescription(`Ocorreu um erro ao processar sua solicitação. Detalhes: ${retryErr.message}`)
                         .setColor(0xFFA500);
-
-                    await message.channel.send(retryErr.message);
                     await message.channel.send({ embeds: [errorEmbed] });
                 }
             } else {
+                // Lança o erro para que seja tratado por outro bloco catch
                 throw retryErr;
             }
         }
     }
 };
 
+// Função para enviar mensagens longas em partes
 const sendChunkedMessage = async (message, content) => {
     const maxLength = 2000;
-    const paragraphs = content.split('\n\n');
-    let currentChunk = '';
 
-    for (const paragraph of paragraphs) {
-        if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
-            await message.channel.send(currentChunk.trim());
-            currentChunk = paragraph;
-        } else {
-            currentChunk += '\n\n' + paragraph;
+    const sendChunks = async (text) => {
+        const paragraphs = text.split('\n\n');
+        let currentChunk = '';
+
+        for (const paragraph of paragraphs) {
+            if ((currentChunk + '\n\n' + paragraph).length > maxLength) {
+                await message.channel.send(currentChunk.trim());
+                currentChunk = paragraph;
+            } else {
+                currentChunk += '\n\n' + paragraph;
+            }
         }
-    }
 
-    if (currentChunk.trim().length > 0) {
-        await message.channel.send(currentChunk.trim());
+        if (currentChunk.trim().length > 0) {
+            await message.channel.send(currentChunk.trim());
+        }
+    };
+
+    if (content.length > maxLength) {
+        await sendChunks(content);
+    } else {
+        await message.channel.send(content.trim());
     }
 };
 
+// Criação do cooldown
+const cooldowns = new Collection();
+
+// Exportação do módulo principal
 module.exports = {
     name: Events.MessageCreate,
     async execute(message) {
         const bot = message.client.user;
+
+        // Ignora mensagens do próprio bot ou de outros bots que não o mencionaram
         if (message.author.id === bot.id || (!message.mentions.has(bot) && message.author.bot)) return;
+
+        // Implementação do cooldown
+        if (!cooldowns.has(message.author.id)) {
+            cooldowns.set(message.author.id, new Collection());
+        }
+
+        const now = Date.now();
+        const timestamps = cooldowns.get(message.author.id);
+        const cooldownAmount = 5 * 1000; // 5 segundos de cooldown
+
+        if (timestamps.has(message.channel.id)) {
+            const expirationTime = timestamps.get(message.channel.id) + cooldownAmount;
+
+            if (now < expirationTime) {
+                const timeLeft = (expirationTime - now) / 1000;
+                // return message.reply(`Aguarde ${timeLeft.toFixed(1)} segundos antes de usar este comando novamente.`);
+                return
+            }
+        }
+
+        timestamps.set(message.channel.id, now);
+        setTimeout(() => timestamps.delete(message.channel.id), cooldownAmount);
 
         try {
             const messageHistory = await fetchMessageHistory(message);
             const truncatedHistory = truncateMessageHistory(messageHistory);
 
-            const shouldRespondResponse = await shouldRespondToMessage(message, bot);
-            if (!shouldRespondResponse.shouldRespond) {
-                console.log(`Dev Assistant decidiu não responder à mensagem do usuário: ${shouldRespondResponse.reason}`);
-                const ignoredEmbed = new EmbedBuilder()
-                    // .setTitle('Ignorado!')
-                    .setDescription(`Decidi não responder à mensagem do usuário: ${shouldRespondResponse.reason}`)
-                    .setColor(0xFFA500);
-
-                
-                await message.channel.send({ embeds: [ignoredEmbed] });
-                return;
-            }
-
             await message.channel.sendTyping();
 
             const reply = await generateResponse(message, bot, truncatedHistory);
-            if (reply && reply.trim()) {
+            if (reply) {
                 await sendChunkedMessage(message, reply);
             }
-
         } catch (err) {
             if (err instanceof APIError && err.status === 400) {
                 await handleAPIError(message, err);
             } else {
+                if (DEBUG) {
+                    const errorEmbed = new EmbedBuilder()
+                        .setTitle(`Erro inesperado`)
+                        .setDescription(`Detalhes: ${err.message}`)
+                        .setColor(0xFF0000);
+                    await message.channel.send({ embeds: [errorEmbed] });
+                }
                 throw err;
             }
         }
     }
-};
+}
