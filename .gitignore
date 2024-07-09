@@ -27,3 +27,5 @@ yarn-error.log
 config.json
 .db.json
 memory.json
+
+project_to_md.py

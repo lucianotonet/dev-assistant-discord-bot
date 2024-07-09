@@ -11,11 +11,11 @@ const groq = new Groq({ apiKey: GROQ_API_KEY });
 const DEBUG = true;
 const TOKEN_LIMIT = 8192;
 const LLM_MODELS = ['gemma2-9b-it', 'llama3-8b-8192', 'llama3-70b-8192', 'gemma-7b-it'];
-const LLM_MODELS_TOOLS = ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768'];
+const LLM_MODELS_TOOLS = ['llama3-70b-8192', 'mixtral-8x7b-32768', 'llama3-8b-8192'];
 const LLM_TEMPERATURE = 0.9;
 
 // Camada de raciocínio -> https://www.promptingguide.ai/techniques
-const LLM_REASONING = 'CoT'; // Zero-Shot, Few-Shot, CoT, Self-Consistency, CoR, APE, Active-Prompt, ... 
+const LLM_REASONING = null; // 'ToT'; // Zero-Shot, Few-Shot, ToT, CoT, Self-Consistency, CoR, APE, Active-Prompt, ... 
 
 // Tempo de espera em milissegundos para novas tentativas após erro 429 (Rate Limit)
 const RATE_LIMIT_RETRY_DELAY = 1000;
@@ -130,47 +130,78 @@ const countTokens = (text) => {
 };
 
 // Função para aplicar a técnica de raciocínio
-const applyReasoningTechinqueLayer = (messages, reasoningMode) => {
-    switch (reasoningMode) {
+const applyReasoningTechniqueLayer = async (messageList) => {
+    switch (LLM_REASONING) {
         case 'Zero-Shot':
             // Implementação para Zero-Shot Prompting
-            return messages; // Zero-Shot: Sem exemplos, apenas direto ao ponto
+            return messageList; // Zero-Shot: Sem exemplos, apenas direto ao ponto
         case 'Few-Shot':
             // Implementação para Few-Shot Prompting
-            messages.unshift({
+            // messages.unshift({
+            //     role: 'system',
+            //     content: "Exemplo 1: Entrada e saída. Exemplo 2: Entrada e saída."
+            // });
+            return messageList; // Few-Shot: Adiciona exemplos
+        case 'ToT':
+            // Implementação para Tree of Thought Prompting (ToT)
+            // -> https://www.promptingguide.ai/pt/techniques/tot
+            // -> https://github.com/dave1010/tree-of-thought-prompting
+            messageList.push({
                 role: 'system',
-                content: "Exemplo 1: Entrada e saída. Exemplo 2: Entrada e saída."
+                content: `Imagine que três especialistas diferentes estão respondendo a esta pergunta.
+                            Todos os especialistas escreverão 1 etapa do seu pensamento e compartilharão com o grupo.
+                            Então, todos os especialistas passarão para a próxima etapa, etc.
+                            Se algum especialista perceber que está errado em algum ponto, ele sairá.`
             });
-            return messages; // Few-Shot: Adiciona exemplos
+
+            const response = await groq.chat.completions.create({
+                messages: messageList,
+                model: LLM_MODELS[0],
+                max_tokens: TOKEN_LIMIT,
+                temperature: LLM_TEMPERATURE,
+            });
+
+            const reply = response.choices[0].message.content;
+
+            // remove a mensagem de sistema
+            messageList.pop();
+
+            // adiciona a resposta gerada            
+            messageList.push({
+                role: 'system',
+                content: reply
+            });
+
+            return messageList; // Tree of Thought: Adiciona raciocínio em árvore (neste caso em apenas um tiro)
         case 'CoT':
             // Implementação para Chain of Thought Prompting (CoT)
-            messages.push({
+            messageList.push({
                 role: 'system',
                 content: "Pense passo a passo para resolver o problema."
             });
-            return messages; // Chain of Thought: Adiciona raciocínio passo a passo
+            return messageList; // Chain of Thought: Adiciona raciocínio passo a passo
         case 'Self-Consistency':
             // Implementação para Self-Consistency
             // Gerar múltiplas respostas e escolher a mais comum seria uma lógica implementada em nível de geração de respostas, fora deste escopo
-            return messages;
+            return messageList;
         case 'CoR':
             // Implementação para Chain of Reasoning Prompting (CoR)
-            messages.push({
+            messageList.push({
                 role: 'system',
                 content: "Raciocine logicamente com base nas premissas fornecidas."
             });
-            return messages; // Chain of Reasoning: Adiciona lógica de raciocínio
+            return messageList; // Chain of Reasoning: Adiciona lógica de raciocínio
         case 'APE':
             // Implementação para Automatic Prompt Engineer (APE)
             // Ajustes automáticos seriam aplicados dinamicamente
-            return messages;
+            return messageList;
         case 'Active-Prompt':
             // Implementação para Active-Prompt
             // Utilização ativa das ferramentas seria aplicada durante a execução das funções
-            return messages;
+            return messageList;
         default:
-            console.warn(`Modo de raciocínio desconhecido: ${reasoningMode}`);
-            return messages;
+            console.warn(`Modo de raciocínio desconhecido: ${LLM_REASONING}`);
+            return messageList;
     }
 };
 
@@ -190,20 +221,21 @@ const generateResponse = async (message, bot) => {
     let chatResponse;
     let modelIndex = 0;
 
+    let messages = [
+        { role: 'system', content: systemPrompt },
+        ...truncatedHistory,
+        { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
+    ];
+
     // Tenta gerar uma resposta usando diferentes modelos em caso de falha
     while (modelIndex < LLM_MODELS_TOOLS.length) {
         await message.channel.sendTyping();
         try {
-            let messages = [
-                { role: 'system', content: systemPrompt },
-                ...truncatedHistory,
-                { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
-            ];
 
             // Aplicar a técnica de raciocínio
-            messages = applyReasoningTechinqueLayer(messages, LLM_REASONING);
+            messages = await applyReasoningTechniqueLayer(messages);
 
-            console.log(colors.blue(`Attempting to generate response using model: ${LLM_MODELS_TOOLS[modelIndex]}`)); // Log the model being used
+            console.log(colors.blue(`Tentando gerar resposta usando o modelo: ${LLM_MODELS_TOOLS[modelIndex]}`)); // Log do modelo sendo usado
             console.log(colors.white(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
 
             chatResponse = await groq.chat.completions.create({
@@ -211,7 +243,6 @@ const generateResponse = async (message, bot) => {
                 model: LLM_MODELS_TOOLS[modelIndex],
                 max_tokens: maxTokens,
                 temperature: LLM_TEMPERATURE,
-                top_p: 1,
                 tool_choice: "auto",
                 tools: tools.map(tool => ({ ...tool }))
             });
@@ -221,7 +252,7 @@ const generateResponse = async (message, bot) => {
         } catch (error) {
             if (error instanceof APIError) {
                 if (error.status === 429) {
-                    console.log(colors.yellow(`Erro 429: Rate limit excedido para o modelo ${LLM_MODELS_TOOLS[modelIndex]}. Tentando novamente após pausa.`));
+                    console.log(colors.yellow(`Erro 429: Limite de taxa excedido para o modelo ${LLM_MODELS_TOOLS[modelIndex]}. Tentando novamente após pausa.`));
                     await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_RETRY_DELAY));
                     modelIndex++;
                 } else if (error.status === 400 && error.message.includes('tool_code')) {
@@ -269,7 +300,7 @@ const generateResponse = async (message, bot) => {
     // Processa chamadas de ferramentas, se houver
     const toolCalls = chatResponse.choices[0].message.tool_calls;
 
-    truncatedHistory.push({
+    messages.push({
         ...chatResponse.choices[0].message
     });
 
@@ -282,7 +313,7 @@ const generateResponse = async (message, bot) => {
                     const functionArgs = JSON.parse(toolCall.function.arguments);
                     const functionResponse = await tool.function_call(functionArgs);
 
-                    truncatedHistory.push({
+                    messages.push({
                         tool_call_id: toolCall.id,
                         role: 'tool',
                         name: tool.function.name,
@@ -290,7 +321,7 @@ const generateResponse = async (message, bot) => {
                     });
                 } catch (error) {
                     console.error(colors.red(`Erro na chamada da ferramenta ${tool.function.name}: ${error.message}`));
-                    truncatedHistory.push({
+                    messages.push({
                         tool_call_id: toolCall.id,
                         role: 'tool',
                         name: tool.function.name,
@@ -314,16 +345,14 @@ const generateResponse = async (message, bot) => {
             CONTEXTO: Esta conversa pode incluir retorno ao chamado de suas ferramentas internas que podem conter as informações necessárias para a sua resposta final. Não precisa 
         `;
 
-        let messages = [
-            { role: 'system', content: finalPrompt },
-            { role: 'user', content: message.content, name: `${message.author.globalName || message.author.username} <@!${message.author.id}>` },
-            ...truncatedHistory,
-        ];
+        messages.shift(); // Remove a mensagem de sistema inicial
+
+        messages.unshift({ role: 'system', content: finalPrompt });
 
         // Aplicar a técnica de raciocínio
-        messages = applyReasoningTechinqueLayer(messages, LLM_REASONING);
+        messages = await applyReasoningTechniqueLayer(messages);
 
-        console.log(colors.blue(`Attempting to generate response using model: ${LLM_MODELS[0]}`)); // Log the model being used
+        console.log(colors.blue(`Tentando gerar resposta usando o modelo: ${LLM_MODELS[0]}`)); // Log do modelo sendo usado
         console.log(colors.white(`messages: ${JSON.stringify(messages, null, 2)}`)); // Log para debug
 
         await message.channel.sendTyping();
@@ -332,7 +361,6 @@ const generateResponse = async (message, bot) => {
             model: LLM_MODELS[0],
             max_tokens: maxTokens,
             temperature: LLM_TEMPERATURE,
-            top_p: 1
         });
 
         return finalResponse.choices[0].message.content;
@@ -373,7 +401,7 @@ const handleAPIError = async (message, err) => {
             if (reply) {
                 await sendChunkedMessage(message, reply);
                 if (DEBUG) {
-                    const debugEmbed = new EmbedBuilder()                        
+                    const debugEmbed = new EmbedBuilder()
                         .setDescription(`Modelo LLM: ${LLM_MODELS_TOOLS[0]}\nTemperatura: ${LLM_TEMPERATURE}\nModo de Raciocínio: ${LLM_REASONING}`)
                         .setColor(0x00FF00);
                     await message.channel.send({ embeds: [debugEmbed] });
@@ -471,7 +499,7 @@ module.exports = {
             if (reply) {
                 await sendChunkedMessage(message, reply);
                 if (DEBUG) {
-                    const debugEmbed = new EmbedBuilder()                        
+                    const debugEmbed = new EmbedBuilder()
                         .setDescription(`Modelo LLM: ${LLM_MODELS_TOOLS[0]}\nTemperatura: ${LLM_TEMPERATURE}\nModo de Raciocínio: ${LLM_REASONING}`)
                         .setColor(0x00FF00);
                     await message.channel.send({ embeds: [debugEmbed] });
